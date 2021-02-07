@@ -25,6 +25,9 @@
 
 package org.openjdk.btrace.compiler;
 
+import java.lang.invoke.CallSite;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -33,14 +36,18 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+
 import org.objectweb.asm.AnnotationVisitor;
 import org.objectweb.asm.Attribute;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.FieldVisitor;
+import org.objectweb.asm.Handle;
 import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
+import org.openjdk.btrace.core.extensions.ExtensionEntry;
+import org.openjdk.btrace.core.extensions.ExtensionRepository;
 
 /** @author Jaroslav Bachorik */
 public class Postprocessor extends ClassVisitor {
@@ -76,7 +83,8 @@ public class Postprocessor extends ClassVisitor {
   @Override
   public MethodVisitor visitMethod(
       int access, String name, String desc, String signature, String[] exceptions) {
-    if (!shortSyntax) return super.visitMethod(access, name, desc, signature, exceptions);
+
+    if (!shortSyntax) return new ExtensionMethodConvertor(super.visitMethod(access, name, desc, signature, exceptions));
 
     if ((access & (Opcodes.ACC_PUBLIC | Opcodes.ACC_PRIVATE)) == 0) {
       access &= ~Opcodes.ACC_PROTECTED;
@@ -94,7 +102,7 @@ public class Postprocessor extends ClassVisitor {
     return new MethodConvertor(
         localVarOffset,
         isconstructor,
-        super.visitMethod(access, name, desc, signature, exceptions));
+        new ExtensionMethodConvertor(super.visitMethod(access, name, desc, signature, exceptions)));
   }
 
   @Override
@@ -757,6 +765,43 @@ public class Postprocessor extends ClassVisitor {
       if (copyEnabled) {
         super.visitTypeInsn(opcode, typeName);
       }
+    }
+  }
+
+  private class ExtensionMethodConvertor extends MethodVisitor {
+    private final MethodType BOOTSTRAP_METHOD_TYPE =
+            MethodType.methodType(
+                    CallSite.class,
+                    MethodHandles.Lookup.class,
+                    String.class,
+                    MethodType.class,
+                    String.class,
+                    String.class);
+
+    public ExtensionMethodConvertor(MethodVisitor parent) {
+      super(Opcodes.ASM9, parent);
+    }
+
+    @Override
+    public void visitTypeInsn(int opcode, String type) {
+      super.visitTypeInsn(opcode, type);
+    }
+
+    @Override
+    public void visitMethodInsn(int opcode, String owner, String name, String descriptor, boolean isInterface) {
+      if (opcode != Opcodes.INVOKEDYNAMIC) {
+        ExtensionEntry extension = ExtensionRepository.getInstance().getExtensionForType(owner);
+        if (extension != null) {
+          switch (opcode) {
+            case Opcodes.INVOKESTATIC: {
+              super.visitInvokeDynamicInsn(name, descriptor, new Handle(Opcodes.H_INVOKESTATIC, "org/openjdk/btrace/instr/ExtensionBootstrap", "bootstrap", BOOTSTRAP_METHOD_TYPE.toMethodDescriptorString(), false), extension.getId(), owner);
+              break;
+            }
+          }
+          return;
+        }
+      }
+      super.visitMethodInsn(opcode, owner, name, descriptor, isInterface);
     }
   }
 }
